@@ -100,14 +100,13 @@ def random_reverse_chan(specs, labels):
     specs = coin * specs + (1-coin) * rev_specs
     labels = coin * labels + (1-coin) * rev_labels
                           
-    raise Exception()
     return specs, labels
 
 
 def augment(specs, labels, time_axis=1, freq_axis=0):
-    specs = mask(specs, axis=time_axis, max_mask_size=16, n_mask=6) # time
+    specs = mask(specs, axis=time_axis, max_mask_size=12, n_mask=6) # time
     specs = mask(specs, axis=freq_axis, max_mask_size=8) # freq
-    # specs, labels = random_reverse_chan(specs, labels)
+    specs, labels = random_reverse_chan(specs, labels)
     return specs, labels
 
 
@@ -206,7 +205,7 @@ def custom_loss(y_true, y_pred, alpha=0.8, l2=0.5):
 
     loss = alpha * tf.keras.losses.MAE(tf.reduce_sum(d_y_true, axis=1),
                                        tf.reduce_sum(d_y_pred, axis=1)) \
-         + (1-alpha) * tf.keras.losses.MSE(tf.reduce_sum(c_y_true, axis=1),
+         + (1-alpha) * tf.keras.losses.MAE(tf.reduce_sum(c_y_true, axis=1),
                                            tf.reduce_sum(c_y_pred, axis=1))
 
     # TODO: OT loss
