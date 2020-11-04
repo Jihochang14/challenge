@@ -64,22 +64,6 @@ args.add_argument('--max_voices', type=int, default=8)
 args.add_argument('--max_noises', type=int, default=5)
 
 
-def minmax_log_on_mel(mel, labels=None):
-    axis = tuple(range(1, len(mel.shape)))
-
-    # MIN-MAX
-    mel_max = tf.math.reduce_max(mel, axis=axis, keepdims=True)
-    mel_min = tf.math.reduce_min(mel, axis=axis, keepdims=True)
-    mel = (mel-mel_min) / (mel_max-mel_min+EPSILON)
-
-    # LOG
-    mel = tf.math.log(mel + EPSILON)
-
-    if labels is not None:
-        return mel, labels
-    return mel
-
-
 def augment(specs, labels, time_axis=1, freq_axis=0):
     specs = mask(specs, axis=time_axis, max_mask_size=24, n_mask=8) # time
     specs = mask(specs, axis=freq_axis, max_mask_size=32) # freq
@@ -101,36 +85,6 @@ def load_data(path):
         return np.load(path)
     else:
         raise ValueError('invalid file format')
-
-
-def custom_scheduler(d_model, warmup_steps=4000):
-    # https://www.tensorflow.org/tutorials/text/transformer#optimizer
-    d_model = tf.cast(d_model, tf.float32)
-
-    def _scheduler(step):
-        step = tf.cast(step+1, tf.float32)
-        arg1 = tf.math.rsqrt(step)
-        arg2 = step * (warmup_steps ** -1.5)
-        return tf.math.rsqrt(d_model) * tf.math.minimum(arg1, arg2)
-    return _scheduler
-
-
-def focal_loss(y_true, y_pred, 
-               alpha=0.75, # 0.25, 
-               gamma=2.0):
-    # https://www.tensorflow.org/addons/api_docs/python/tfa/losses/sigmoid_focal_crossentropy
-    # assume y_pred is prob
-
-    # Get the cross_entropy for each entry
-    ce = K.binary_crossentropy(y_true, y_pred)
-
-    p_t = (y_true * y_pred) + ((1 - y_true) * (1 - y_pred))
-
-    alpha_factor = y_true * alpha + (1 - y_true) * (1 - alpha)
-    modulating_factor = tf.pow((1.0 - p_t), gamma)
-
-    # compute the final loss and return
-    return tf.reduce_sum(alpha_factor * modulating_factor * ce, axis=-1)
 
 
 def make_dataset(config, training=True):
@@ -170,7 +124,7 @@ if __name__ == "__main__":
     config = args.parse_args()
     print(config)
 
-    strategy = tf.distribute.MirroredStrategy()
+    # strategy = tf.distribute.MirroredStrategy()
 
     TOTAL_EPOCH = config.epochs
     NAME = config.name if config.name.endswith('.h5') else config.name + '.h5'

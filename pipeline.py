@@ -115,6 +115,37 @@ def to_class_labels(x, y):
     return x, y
 
 
+def to_both_labels(x, y):
+    '''
+    INPUT - y : [n_voices, n_frames, 30]
+    OUTPUT - y1: [n_frames, 30] 
+             y2: [3, 10]
+    '''
+    y1 = tf.reduce_sum(y, axis=0)
+    y1 = tf.clip_by_value(y1, 0, 1)
+
+    y2 = tf.reduce_max(y, axis=1)
+    y2 = tf.reduce_sum(y2, axis=0)
+    y2 = tf.reshape(y2, [3, 10])
+    
+    return x, y1, y2
+
+
+def to_both_labels2(x, y):
+    '''
+    INPUT - y : [n_voices, n_frames, 30]
+    OUTPUT - y1: [n_frames, 30] 
+             y2: [3, 10]
+    '''
+    y1 = tf.reduce_sum(y, axis=0)
+    y1 = tf.clip_by_value(y1, 0, 1)
+
+    y2 = tf.reduce_max(y, axis=1)
+    y2 = tf.reduce_sum(y2, axis=0)
+    
+    return x, y1, y2
+
+
 def make_pipeline(backgrounds, # a list of backgrounds noises
                   voices, # a list of human voicess
                   labels, # a list of labelss of human voicess

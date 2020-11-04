@@ -192,3 +192,19 @@ def phase_vocoder(complex_spec: tf.Tensor,
     spec = tf.concat([real, imag], axis=-1)
     return spec
 
+
+"""NORMALIZATION"""
+def minmax_log_on_mel(mel, labels=None):
+    axis = tuple(range(1, len(mel.shape)))
+
+    # MIN-MAX
+    mel_max = tf.math.reduce_max(mel, axis=axis, keepdims=True)
+    mel_min = tf.math.reduce_min(mel, axis=axis, keepdims=True)
+    mel = (mel-mel_min) / (mel_max-mel_min+EPSILON)
+
+    # LOG
+    mel = tf.math.log(mel + EPSILON)
+
+    if labels is not None:
+        return mel, labels
+    return mel
