@@ -20,7 +20,7 @@ from models import transformer_layer
 
 args = argparse.ArgumentParser()
 args.add_argument('--name', type=str, required=True)
-args.add_argument('--model', type=str, default='EfficientNetB2')
+args.add_argument('--model', type=str, default='EfficientNetB4')
 args.add_argument('--pretrain', type=bool, default=False)
 args.add_argument('--n_layers', type=int, default=0)
 args.add_argument('--n_dim', type=int, default=256)
@@ -36,7 +36,7 @@ args.add_argument('--labels', type=str,
 args.add_argument('--noises', type=str,
                   default='/codes/RDChallenge/tf_codes/sounds/noises_specs.pickle')
 args.add_argument('--test_background_sounds', type=str,
-                  default='/codes/generate_wavs/test_drone_normed_complex.pickle')
+                  default='/codes/generate_wavs/test_drone_normed_complex_v2.pickle')
 args.add_argument('--test_voices', type=str,
                   default='/codes/generate_wavs/test_voice_normed_complex.pickle')
 args.add_argument('--test_labels', type=str,
@@ -62,11 +62,6 @@ args.add_argument('--max_noises', type=int, default=5)
 MULTIPLIER = 10
 
 
-def safe_div(x, y, eps=EPSILON):
-    # returns safe x / max(y, epsilon)
-    return x / tf.maximum(y, eps)
-
-
 def minmax_log_on_mel(mel, labels=None):
     axis = tuple(range(1, len(mel.shape)))
 
@@ -83,7 +78,6 @@ def minmax_log_on_mel(mel, labels=None):
     return mel
 
 
-# TODO: need to fix this function
 def random_reverse_chan(specs, labels):
     # Assume MelSpectrogram
     # specs: [..., freq, time, chan]
@@ -103,7 +97,7 @@ def random_reverse_chan(specs, labels):
     return specs, labels
 
 
-def augment(specs, labels, time_axis=1, freq_axis=0):
+def augment(specs, labels, time_axis=-2, freq_axis=-3):
     specs = mask(specs, axis=time_axis, max_mask_size=12, n_mask=6) # time
     specs = mask(specs, axis=freq_axis, max_mask_size=8) # freq
     specs, labels = random_reverse_chan(specs, labels)
@@ -152,7 +146,7 @@ def make_dataset(config, training=True):
                              n_classes=30,
                              snr=config.snr)
     pipeline = pipeline.map(to_density_labels)
-    if training:
+    if training: 
         pipeline = pipeline.map(augment)
     pipeline = pipeline.batch(config.batch_size, drop_remainder=False)
     pipeline = pipeline.map(complex_to_magphase)
@@ -189,7 +183,9 @@ def d_total(y_true, y_pred, apply_round=True):
     return 0.8 * d_dir + 0.2 * d_cls
 
 
-def custom_loss(y_true, y_pred, alpha=0.8, l2=0.5):
+def custom_loss(y_true, y_pred, alpha=0.8, l2=1):
+    # opt alpha 0.5 (bad) 0.8 (best) 0.7 (bad)
+    # optimal l2 -> 0.5 (no), 2 (no), 1 (best) 
     # y_true, y_pred = [None, time, 30]
     # [None, time, 30] -> [None, time, 3, 10]
     t_true = tf.stack(tf.split(y_true, 3, axis=-1), axis=-2)
