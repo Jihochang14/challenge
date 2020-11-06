@@ -106,3 +106,11 @@ def apply_kernel_regularizer(model, kernel_regularizer):
     model = tf.keras.models.clone_model(model)
     return model
 
+
+'''
+ETC
+'''
+def safe_div(x, y, eps=EPSILON):
+    # returns safe x / max(y, epsilon)
+    return x / tf.maximum(y, eps)
+

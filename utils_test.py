@@ -81,6 +81,10 @@ class UtilsTest(unittest.TestCase):
         for b, n in zip(base_weights, new_weights):
             self.assertNotEqual(b.numpy().tolist(), n.numpy().tolist())
 
+    def test_safe_div(self):
+        raise NotImplemented('TODO: not yet implemented')
+
+
 if __name__ == '__main__':
     os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
     os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
