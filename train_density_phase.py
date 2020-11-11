@@ -1,4 +1,5 @@
 import argparse
+import math
 import numpy as np
 import os
 from pathlib import Path
@@ -9,7 +10,7 @@ from tensorflow.keras.callbacks import *
 from tensorflow.keras.losses import *
 from tensorflow.keras.metrics import *
 from tensorflow.keras.optimizers import *
-from tensorflow.keras.layers import Dropout
+from tensorflow.keras.layers import Conv2D, ZeroPadding2D, Concatenate, BatchNormalization, Dropout
 import tensorflow.keras.backend as K
 from tensorflow.keras.utils import multi_gpu_model
 
@@ -40,6 +41,22 @@ args.add_argument('--n_classes', type=int, default=30)
 args.add_argument('--n_mels', type=int, default=128)
 
 # DATA
+# args.add_argument('--background_sounds', type=str,
+#                   default='generate_wavs/codes/drone_normed_complex_v2.pickle')
+# args.add_argument('--voices', type=str,
+#                   default='generate_wavs/codes/voice_normed_complex.pickle')
+# args.add_argument('--labels', type=str,
+#                   default='generate_wavs/codes/voice_labels_mfc.npy')
+# args.add_argument('--noises', type=str,
+#                   default='generate_wavs/codes/noises_specs.pickle')
+# args.add_argument('--test', default=True, action='store_false')
+# args.add_argument('--test_background_sounds', type=str,
+#                   default='generate_wavs/codes/test_drone_normed_complex.pickle')
+# args.add_argument('--test_voices', type=str,
+#                   default='generate_wavs/codes/test_voice_normed_complex.pickle')
+# args.add_argument('--test_labels', type=str,
+#                   default='generate_wavs/codes/test_voice_labels_mfc.npy')
+
 args.add_argument('--background_sounds', type=str,
                   default='generate_wavs/codes/drone_normed_complex_v3.pickle')
 args.add_argument('--voices', type=str,
@@ -151,6 +168,48 @@ def to_density_labels(x, y):
     y = tf.reduce_sum(y, axis=-3)
     return x, y
 
+def make_extractor(config):
+    mel_matrix = tf.signal.linear_to_mel_weight_matrix(config.n_mels, 257, 16000)
+
+    def extract(complex_tensor, y=None):
+        # complex_to_magphase
+        n_chan = 2
+        real = complex_tensor[..., :n_chan]
+        img = complex_tensor[..., n_chan:]
+
+        mag = tf.math.sqrt(real**2 + img**2)
+        phase = tf.math.atan2(img, real)
+        #phase = (phase - (math.pi / 2)) * 0.1
+        phase = phase * 0.1
+
+        # magphase_to_mel
+        mel = tf.tensordot(mag, mel_matrix, axes=[-3, 0]) # [b, time, chan, mel]
+        
+        if len(mel.shape) == 4:
+            mel = tf.transpose(mel, perm=[0, 3, 1, 2])
+        elif len(mel.shape) == 3:
+            mel = tf.transpose(mel, perm=[2, 0, 1])
+        else:
+            raise ValueError('len(mel.shape) must be 3 or 4')
+
+        # minmax_log_on_mel
+        axis = tuple(range(1, len(mel.shape)))
+        
+        mel_max = tf.math.reduce_max(mel, axis=axis, keepdims=True) # MIN-MAX
+        mel_min = tf.math.reduce_min(mel, axis=axis, keepdims=True)
+        mel = safe_div(mel-mel_min, mel_max-mel_min)
+        
+        logmel = tf.math.log(mel + EPSILON)    # LOG
+
+        inputs = {
+            'logmel': logmel,
+            'phase': phase
+        }
+        if y is None:
+            return inputs
+        return inputs, y
+    return extract
+
 
 def make_dataset(config, training=True):
     # Load required datasets
@@ -174,13 +233,15 @@ def make_dataset(config, training=True):
                              max_noises=config.max_noises,
                              n_classes=30,
                              snr=config.snr)
+
     pipeline = pipeline.map(to_density_labels)
     if training:
         pipeline = pipeline.map(augment)
     pipeline = pipeline.batch(config.batch_size, drop_remainder=False)
-    pipeline = pipeline.map(complex_to_magphase)
-    pipeline = pipeline.map(magphase_to_mel(config.n_mels))
-    pipeline = pipeline.map(minmax_log_on_mel)
+    #pipeline = pipeline.map(complex_to_magphase)
+    #pipeline = pipeline.map(magphase_to_mel(config.n_mels))
+    #pipeline = pipeline.map(minmax_log_on_mel)
+    pipeline = pipeline.map(make_extractor(config))
     pipeline = pipeline.map(make_preprocess_labels(config.multiplier))
     return pipeline.prefetch(AUTOTUNE)
 
@@ -298,7 +359,11 @@ if __name__ == "__main__":
 
 
     """ MODEL """
-    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 2))
+    input_mel = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 2), name='logmel')
+    input_pha = tf.keras.layers.Input(shape=(257, config.n_frame, 2), name='phase')
+    x = ZeroPadding2D((0, 1))(input_pha)
+    x = Conv2D(2, 3, strides=(2, 1), padding='valid', groups=2, use_bias=True)(x)
+    x = Concatenate(axis=-1)([input_mel, x])
     model = getattr(model, config.model)(
         include_top=False,
         weights=None,
@@ -309,7 +374,7 @@ if __name__ == "__main__":
         utils=tf.keras.utils,
     )
     out = model.output
-    out = Dropout(0.2)(out)
+    #out = Dropout(0.2)(out)
     out = tf.transpose(out, perm=[0, 2, 1, 3])
     out = tf.keras.layers.Reshape([-1, out.shape[-1]*out.shape[-2]])(out)
 
@@ -333,7 +398,7 @@ if __name__ == "__main__":
             out = tf.keras.layers.ReLU()(out)
 
     out = tf.keras.layers.Dense(config.n_classes, activation='relu')(out)
-    model = tf.keras.models.Model(inputs=model.input, outputs=out)
+    model = tf.keras.models.Model(inputs=[input_mel, input_pha], outputs=out)
 
     if config.pretrain:
         model.load_weights(NAME)

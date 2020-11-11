@@ -115,7 +115,7 @@ def complex_to_magphase(complex_tensor, y=None):
     phase = tf.math.atan2(img, real)
 
     magphase = tf.concat([mag, phase], axis=-1)
-
+    
     if y is None:
         return magphase
     return magphase, y
