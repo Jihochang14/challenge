@@ -201,9 +201,14 @@ def make_extractor(config):
         
         logmel = tf.math.log(mel + EPSILON)    # LOG
 
+        loc = tf.stack([complex_tensor[..., 0] / mag[..., 0],
+                         complex_tensor[..., 1] / mag[..., 0],
+                         complex_tensor[..., 2] / mag[..., 1],
+                         complex_tensor[..., 3] / mag[..., 1]], axis=3)
         inputs = {
             'logmel': logmel,
-            'phase': phase
+            #'phase': phase,
+            'phase': loc
         }
         if y is None:
             return inputs
@@ -334,7 +339,7 @@ def cos_sim(y_true, y_pred):
 def warmup_cosine_decay(lr=0.1, epochs=500, warmup=10):
     def func(epoch):
         if epoch <= warmup:
-            return lr * ((epoch + 1) / warmup) ** 2
+            return lr * ((epoch + 1) / (warmup + 1)) ** 2
         else:
             return lr * 0.5 * (1 + np.cos(np.pi * (epoch - warmup) / np.float32(epochs - warmup)))
     return func
@@ -360,9 +365,9 @@ if __name__ == "__main__":
 
     """ MODEL """
     input_mel = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 2), name='logmel')
-    input_pha = tf.keras.layers.Input(shape=(257, config.n_frame, 2), name='phase')
+    input_pha = tf.keras.layers.Input(shape=(257, config.n_frame, 4), name='phase')
     x = ZeroPadding2D((0, 1))(input_pha)
-    x = Conv2D(2, 3, strides=(2, 1), padding='valid', groups=2, use_bias=True)(x)
+    x = Conv2D(4, 3, strides=(2, 1), padding='valid', groups=2, use_bias=True)(x)
     x = Concatenate(axis=-1)([input_mel, x])
     model = getattr(model, config.model)(
         include_top=False,

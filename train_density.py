@@ -9,9 +9,10 @@ from tensorflow.keras.callbacks import *
 from tensorflow.keras.losses import *
 from tensorflow.keras.metrics import *
 from tensorflow.keras.optimizers import *
-from tensorflow.keras.layers import Dropout
+from tensorflow.keras.layers import Conv2D, ZeroPadding2D, Concatenate, BatchNormalization, Dropout
 import tensorflow.keras.backend as K
 from tensorflow.keras.utils import multi_gpu_model
+import tensorflow_addons as tfa
 
 import efficientnet.model as model
 from metrics import *
@@ -40,6 +41,22 @@ args.add_argument('--n_classes', type=int, default=30)
 args.add_argument('--n_mels', type=int, default=128)
 
 # DATA
+# args.add_argument('--background_sounds', type=str,
+#                   default='generate_wavs/codes/drone_normed_complex_v2.pickle')
+# args.add_argument('--voices', type=str,
+#                   default='generate_wavs/codes/voice_normed_complex.pickle')
+# args.add_argument('--labels', type=str,
+#                   default='generate_wavs/codes/voice_labels_mfc.npy')
+# args.add_argument('--noises', type=str,
+#                   default='generate_wavs/codes/noises_specs.pickle')
+# args.add_argument('--test', default=True, action='store_false')
+# args.add_argument('--test_background_sounds', type=str,
+#                   default='generate_wavs/codes/test_drone_normed_complex.pickle')
+# args.add_argument('--test_voices', type=str,
+#                   default='generate_wavs/codes/test_voice_normed_complex.pickle')
+# args.add_argument('--test_labels', type=str,
+#                   default='generate_wavs/codes/test_voice_labels_mfc.npy')
+
 args.add_argument('--background_sounds', type=str,
                   default='generate_wavs/codes/drone_normed_complex_v3.pickle')
 args.add_argument('--voices', type=str,
@@ -58,7 +75,7 @@ args.add_argument('--test_labels', type=str,
 
 # TRAINING
 args.add_argument('--optimizer', type=str, default='adam',
-                                 choices=['adam', 'sgd', 'rmsprop', 'adamp'])
+                                 choices=['adam', 'sgd', 'rmsprop', 'adamp', 'adamw'])
 args.add_argument('--lr', type=float, default=0.001)
 args.add_argument('--lr_factor', type=float, default=0.7)
 args.add_argument('--lr_patience', type=int, default=10)
@@ -96,7 +113,12 @@ def minmax_log_on_mel(mel, labels=None):
     mel = safe_div(mel-mel_min, mel_max-mel_min)
 
     # LOG
+    #mel = tf.math.log((mel + 1.) * 10.) #2.71828 -18.420680743952367
     mel = tf.math.log(mel + EPSILON)
+    mel1 = mel * -1.
+    mel2 = mel + 18.420680743952367
+    mel3 = tf.abs(tf.abs(mel + mel2) - 18.420680743952367)
+    mel = tf.concat([mel1, mel2, mel3], axis=-1)
 
     if labels is not None:
         return mel, labels
@@ -273,7 +295,7 @@ def cos_sim(y_true, y_pred):
 def warmup_cosine_decay(lr=0.1, epochs=500, warmup=10):
     def func(epoch):
         if epoch <= warmup:
-            return lr * ((epoch + 1) / warmup) ** 2
+            return lr * ((epoch + 1) / (warmup + 1)) ** 2
         else:
             return lr * 0.5 * (1 + np.cos(np.pi * (epoch - warmup) / np.float32(epochs - warmup)))
     return func
@@ -298,7 +320,8 @@ if __name__ == "__main__":
 
 
     """ MODEL """
-    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 2))
+    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 6))
+    #x = BatchNormalization(axis=-1, momentum=0.99)(x)
     model = getattr(model, config.model)(
         include_top=False,
         weights=None,
@@ -309,7 +332,7 @@ if __name__ == "__main__":
         utils=tf.keras.utils,
     )
     out = model.output
-    out = Dropout(0.2)(out)
+    #out = Dropout(0.2)(out)
     out = tf.transpose(out, perm=[0, 2, 1, 3])
     out = tf.keras.layers.Reshape([-1, out.shape[-1]*out.shape[-2]])(out)
 
@@ -343,12 +366,14 @@ if __name__ == "__main__":
         opt = Adam(config.lr, clipvalue=0.01)
     elif config.optimizer == 'adamp':
         opt = AdamP(config.lr, clipvalue=0.01)
+    elif config.optimizer == 'adamw':
+        opt = tfa.optimizers.AdamW(weight_decay=config.l2, learning_rate=config.lr)
     elif config.optimizer == 'sgd':
         opt = SGD(config.lr, momentum=0.9)
     else:
         opt = RMSprop(config.lr, momentum=0.9)
 
-    if config.l2 > 0:
+    if config.l2 > 0 and config.optimizer != 'adamw':
         model = apply_kernel_regularizer(
             model, tf.keras.regularizers.l2(config.l2))
 

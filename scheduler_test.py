@@ -4,16 +4,45 @@ import numpy as np
 import tensorflow as tf
 import tensorflow.keras.backend as K
 
+import matplotlib.pyplot as plt
+
+
 def _scheduler(step):
     step = step + 1
     arg1 = K.eval(tf.math.rsqrt(np.float32(step)))
     arg2 = step * ((500 / 12) ** -1.5)
     r = K.eval(tf.math.rsqrt(np.float32(4096))) * min(arg1, arg2)
-    print(step, '\t', arg1, '\t', arg2, '\t', r)
+    #print(step, '\t', arg1, '\t', arg2, '\t', r)
     return r
 
-for i in range(500):
-    _scheduler(i)
+
+def warmup_cosine_decay(lr=0.1, epochs=500, warmup=10):
+    def func(epoch):
+        if epoch <= warmup:
+            return lr * (epoch / warmup) ** 2
+        else:
+            return lr * 0.5 * (1 + np.cos(np.pi * (epoch - warmup) / np.float32(epochs - warmup)))
+    return func
+
+
+if __name__ == '__main__':
+    x = np.array([i for i in range(500)])
+    origin = np.array([_scheduler(x) for x in range(500)])
+    func = warmup_cosine_decay(0.001, 500, 10)
+    cos = np.array([func(x) for x in range(500)])
+    func2 = warmup_cosine_decay(0.003, 500, 10)
+    cos2 = np.array([func2(x) for x in range(500)])
+
+    
+    plt.plot(x, origin, label='origin decay')
+    plt.plot(x, cos, label='cos decay (0.001)')
+    plt.plot(x, cos2, label='cos decay (0.003)')
+
+    plt.legend()
+    plt.savefig('decay.png', dpi=300)
+    plt.close()
+
+
 
 '''
 1        1.0     0.0037180640123591203   5.8094750193111255e-05

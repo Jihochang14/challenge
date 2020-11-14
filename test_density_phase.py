@@ -11,6 +11,7 @@ from tensorflow.keras.callbacks import *
 from tensorflow.keras.losses import *
 from tensorflow.keras.metrics import *
 from tensorflow.keras.optimizers import *
+from tensorflow.keras.layers import Conv2D, ZeroPadding2D, Concatenate, BatchNormalization, Dropout
 import tensorflow.keras.backend as K
 from tensorflow.keras.utils import multi_gpu_model
 from tensorflow.python.keras.saving import hdf5_format
@@ -49,6 +50,9 @@ args.add_argument('--l2', type=float, default=1e-6)
 
 args.add_argument('--multiplier', type=float, default=10.)
 
+def safe_div(x, y, eps=EPSILON):
+    # returns safe x / max(y, epsilon)
+    return x / tf.maximum(y, eps)
 
 def minmax_log_on_mel(mel, labels=None):
     axis = tuple(range(1, len(mel.shape)))
@@ -59,13 +63,55 @@ def minmax_log_on_mel(mel, labels=None):
     mel = (mel-mel_min) / (mel_max-mel_min+EPSILON)
 
     # LOG
-    #mel = tf.math.log((mel + 1.) * 10.)
     mel = tf.math.log(mel + EPSILON)
-    #mel = tf.concat([mel, mel + 18.420680743952367], axis=-1)
-    
+
     if labels is not None:
         return mel, labels
     return mel
+
+
+def make_extractor(config):
+    mel_matrix = tf.signal.linear_to_mel_weight_matrix(config.n_mels, 257, 16000)
+
+    def extract(complex_tensor, y=None):
+        # complex_to_magphase
+        n_chan = 2
+        real = complex_tensor[..., :n_chan]
+        img = complex_tensor[..., n_chan:]
+
+        mag = tf.math.sqrt(real**2 + img**2)
+        phase = tf.math.atan2(img, real)
+        #phase = (phase - (math.pi / 2)) * 0.1
+        phase = phase * 0.1
+
+        # magphase_to_mel
+        mel = tf.tensordot(mag, mel_matrix, axes=[-3, 0]) # [b, time, chan, mel]
+        
+        if len(mel.shape) == 4:
+            mel = tf.transpose(mel, perm=[0, 3, 1, 2])
+        elif len(mel.shape) == 3:
+            mel = tf.transpose(mel, perm=[2, 0, 1])
+        else:
+            raise ValueError('len(mel.shape) must be 3 or 4')
+
+        # minmax_log_on_mel
+        axis = tuple(range(1, len(mel.shape)))
+        
+        mel_max = tf.math.reduce_max(mel, axis=axis, keepdims=True) # MIN-MAX
+        mel_min = tf.math.reduce_min(mel, axis=axis, keepdims=True)
+        #mel = safe_div(mel-mel_min, mel_max-mel_min)
+        mel = (mel-mel_min) / (mel_max-mel_min+EPSILON)
+        
+        logmel = tf.math.log(mel + EPSILON)    # LOG
+
+        inputs = {
+            'logmel': logmel,
+            'phase': phase
+        }
+        if y is None:
+            return inputs
+        return inputs, y
+    return extract
 
 
 def load_weights(model, filepath, custom=True):
@@ -118,7 +164,11 @@ if __name__ == "__main__":
     
 
     """ MODEL """
-    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 2))
+    input_mel = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 2), name='logmel')
+    input_pha = tf.keras.layers.Input(shape=(257, config.n_frame, 2), name='phase')
+    x = ZeroPadding2D((0, 1))(input_pha)
+    x = Conv2D(2, 3, strides=(2, 1), padding='valid', groups=2, use_bias=True)(x)
+    x = Concatenate(axis=-1)([input_mel, x])
     model = getattr(model, config.model)(
         include_top=False,
         weights=None,
@@ -128,7 +178,9 @@ if __name__ == "__main__":
         models=tf.keras.models,
         utils=tf.keras.utils,
     )
-    out = tf.transpose(model.output, perm=[0, 2, 1, 3])
+    out = model.output
+    #out = Dropout(0.2)(out)
+    out = tf.transpose(out, perm=[0, 2, 1, 3])
     out = tf.keras.layers.Reshape([-1, out.shape[-1]*out.shape[-2]])(out)
 
     if config.n_layers > 0:
@@ -187,12 +239,13 @@ if __name__ == "__main__":
     wavs = list(map(load_wav, wavs)) 
     target = max([tuple(wav.shape) for wav in wavs]) 
     wavs = list(map(lambda x: tf.pad(x, [[0, 0], [0, target[1]-x.shape[1]], [0, 0]]), 
-                    wavs)) 
+                    wavs))
     wavs = tf.convert_to_tensor(wavs) 
-    wavs = complex_to_magphase(wavs) 
-    wavs = magphase_to_mel(config.n_mels)(wavs) 
-    wavs = minmax_log_on_mel(wavs)
-    wavs = model.predict(wavs)
+    #wavs = complex_to_magphase(wavs) 
+    #wavs = magphase_to_mel(config.n_mels)(wavs) 
+    #wavs = minmax_log_on_mel(wavs) 
+    wavs = make_extractor(config)(wavs)
+    wavs = model.predict(wavs) 
 
     # wavs = list(map(load_wav, wavs))
     # wavs = list(map(complex_to_magphase, wavs))
