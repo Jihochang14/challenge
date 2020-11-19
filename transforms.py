@@ -61,7 +61,7 @@ def magphase_to_mel(num_mel_bins=100,
         '''
         x = x[..., :tf.shape(x)[-1] // 2] # remove phase
         x = tf.tensordot(x, mel_matrix, axes=[-3, 0]) # [b, time, chan, mel]
-        
+
         if len(x.shape) == 4:
             x = tf.transpose(x, perm=[0, 3, 1, 2])
         elif len(x.shape) == 3:

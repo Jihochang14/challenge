@@ -50,18 +50,27 @@ args.add_argument('--l2', type=float, default=1e-6)
 args.add_argument('--multiplier', type=float, default=10.)
 
 
+def safe_div(x, y, eps=EPSILON):
+    # returns safe x / max(y, epsilon)
+    return x / tf.maximum(y, eps)
+
+
 def minmax_log_on_mel(mel, labels=None):
     axis = tuple(range(1, len(mel.shape)))
 
     # MIN-MAX
     mel_max = tf.math.reduce_max(mel, axis=axis, keepdims=True)
     mel_min = tf.math.reduce_min(mel, axis=axis, keepdims=True)
-    mel = (mel-mel_min) / (mel_max-mel_min+EPSILON)
+    #mel = (mel-mel_min) / (mel_max-mel_min+EPSILON)
+    mel = safe_div(mel-mel_min, mel_max-mel_min)
 
     # LOG
     #mel = tf.math.log((mel + 1.) * 10.)
     mel = tf.math.log(mel + EPSILON)
-    #mel = tf.concat([mel, mel + 18.420680743952367], axis=-1)
+    mel1 = mel * -1.
+    mel2 = mel + 18.420680743952367
+    mel3 = tf.abs(tf.abs(mel + mel2) - 18.420680743952367)
+    mel = tf.concat([mel1, mel2, mel3], axis=-1)
     
     if labels is not None:
         return mel, labels
@@ -118,7 +127,7 @@ if __name__ == "__main__":
     
 
     """ MODEL """
-    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 2))
+    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 6))
     model = getattr(model, config.model)(
         include_top=False,
         weights=None,
@@ -150,8 +159,9 @@ if __name__ == "__main__":
             out = tf.keras.layers.Flatten()(out)
             out = tf.keras.layers.ReLU()(out)
 
-    out = tf.keras.layers.Dense(config.n_classes, activation='relu')(out)
-    model = tf.keras.models.Model(inputs=model.input, outputs=out)
+    out1 = tf.keras.layers.Dense(config.n_classes, activation='relu', name='out1')(out)
+    out2 = tf.keras.layers.Dense(config.n_classes, activation='relu', name='out2')(out)
+    model = tf.keras.models.Model(inputs=model.input, outputs=[out1, out2])
     
     #model.load_weights(str(H5_NAME))
     load_weights(model, str(H5_NAME), custom=True)
@@ -192,7 +202,7 @@ if __name__ == "__main__":
     wavs = complex_to_magphase(wavs) 
     wavs = magphase_to_mel(config.n_mels)(wavs) 
     wavs = minmax_log_on_mel(wavs)
-    wavs = model.predict(wavs)
+    wavs, _ = model.predict(wavs)
 
     # wavs = list(map(load_wav, wavs))
     # wavs = list(map(complex_to_magphase, wavs))

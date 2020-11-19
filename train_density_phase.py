@@ -202,8 +202,8 @@ def make_extractor(config):
         logmel = tf.math.log(mel + EPSILON)    # LOG
 
         loc = tf.stack([complex_tensor[..., 0] / mag[..., 0],
-                         complex_tensor[..., 1] / mag[..., 0],
-                         complex_tensor[..., 2] / mag[..., 1],
+                         complex_tensor[..., 1] / mag[..., 1],
+                         complex_tensor[..., 2] / mag[..., 0],
                          complex_tensor[..., 3] / mag[..., 1]], axis=3)
         inputs = {
             'logmel': logmel,

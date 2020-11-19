@@ -11,7 +11,6 @@ from tensorflow.keras.metrics import *
 from tensorflow.keras.optimizers import *
 from tensorflow.keras.layers import Conv2D, ZeroPadding2D, Concatenate, BatchNormalization, Dropout
 import tensorflow.keras.backend as K
-from tensorflow.keras.regularizers import Regularizer
 from tensorflow.keras.utils import multi_gpu_model
 import tensorflow_addons as tfa
 
@@ -35,7 +34,6 @@ args.add_argument('--gpus', type=int, default=[0], nargs='+')
 args.add_argument('--mode', type=str, default='GRU',
                                  choices=['GRU', 'transformer'])
 args.add_argument('--pretrain', type=bool, default=False)
-args.add_argument('--transfer', default=False, action='store_true')
 args.add_argument('--n_layers', type=int, default=0)
 args.add_argument('--n_dim', type=int, default=256)
 args.add_argument('--n_heads', type=int, default=8)
@@ -43,37 +41,37 @@ args.add_argument('--n_classes', type=int, default=30)
 args.add_argument('--n_mels', type=int, default=128)
 
 # DATA
-args.add_argument('--background_sounds', type=str,
-                  default='generate_wavs/codes/drone_normed_complex_v2.pickle')
-args.add_argument('--voices', type=str,
-                  default='generate_wavs/codes/voice_normed_complex.pickle')
-args.add_argument('--labels', type=str,
-                  default='generate_wavs/codes/voice_labels_mfc.npy')
-args.add_argument('--noises', type=str,
-                  default='generate_wavs/codes/noises_specs.pickle')
-args.add_argument('--test', default=True, action='store_false')
-args.add_argument('--test_background_sounds', type=str,
-                  default='generate_wavs/codes/test_drone_normed_complex.pickle')
-args.add_argument('--test_voices', type=str,
-                  default='generate_wavs/codes/test_voice_normed_complex.pickle')
-args.add_argument('--test_labels', type=str,
-                  default='generate_wavs/codes/test_voice_labels_mfc.npy')
-
 # args.add_argument('--background_sounds', type=str,
-#                   default='generate_wavs/codes/drone_normed_complex_v3.pickle')
+#                   default='generate_wavs/codes/drone_normed_complex_v2.pickle')
 # args.add_argument('--voices', type=str,
-#                   default='generate_wavs/codes/voice_normed_complex_v2_2.pickle')
+#                   default='generate_wavs/codes/voice_normed_complex.pickle')
 # args.add_argument('--labels', type=str,
-#                   default='generate_wavs/codes/voice_labels_mfc_v2_1.npy')
+#                   default='generate_wavs/codes/voice_labels_mfc.npy')
 # args.add_argument('--noises', type=str,
 #                   default='generate_wavs/codes/noises_specs.pickle')
 # args.add_argument('--test', default=True, action='store_false')
 # args.add_argument('--test_background_sounds', type=str,
-#                   default='generate_wavs/codes/test_drone_normed_complex_v2.pickle')
+#                   default='generate_wavs/codes/test_drone_normed_complex.pickle')
 # args.add_argument('--test_voices', type=str,
 #                   default='generate_wavs/codes/test_voice_normed_complex.pickle')
 # args.add_argument('--test_labels', type=str,
 #                   default='generate_wavs/codes/test_voice_labels_mfc.npy')
+
+args.add_argument('--background_sounds', type=str,
+                  default='generate_wavs/codes/drone_normed_complex_v3.pickle')
+args.add_argument('--voices', type=str,
+                  default='generate_wavs/codes/voice_normed_complex_v2_2.pickle')
+args.add_argument('--labels', type=str,
+                  default='generate_wavs/codes/voice_labels_mfc_v2_1.npy')
+args.add_argument('--noises', type=str,
+                  default='generate_wavs/codes/noises_specs.pickle')
+args.add_argument('--test', default=True, action='store_false')
+args.add_argument('--test_background_sounds', type=str,
+                  default='generate_wavs/codes/test_drone_normed_complex_v2.pickle')
+args.add_argument('--test_voices', type=str,
+                  default='generate_wavs/codes/test_voice_normed_complex.pickle')
+args.add_argument('--test_labels', type=str,
+                  default='generate_wavs/codes/test_voice_labels_mfc.npy')
 
 # TRAINING
 args.add_argument('--optimizer', type=str, default='adam',
@@ -120,11 +118,29 @@ def minmax_log_on_mel(mel, labels=None):
     # mel1 = mel * -1.
     # mel2 = mel + 18.420680743952367
     # mel3 = tf.abs(tf.abs(mel + mel2) - 18.420680743952367)
-    # mel = tf.concat([mel1, mel2, mel3], axis=-1)
+    # mel = tf.concat([mel1, mel2, mel3], axis=-1) / 3.
+
+    m = 18.420680743952367
+    mel = mel + m
+
+    n = 6
+    out = [K.zeros_like(mel) for _ in range(n)]
+    
+    for i in range(1, n):
+        y = (n - 1.) * mel - (i - 1) * m
+        y = K.clip(y, 0., m)
+        out[i] = out[i] + y
+
+    for i in range(0, n-1):
+        y = -(n - 1.) * mel + (i + 1) * m
+        y = K.clip(y, 0., m)
+        out[i] = out[i] + y
+
+    out = tf.concat(out, axis=-1)
 
     if labels is not None:
-        return mel, labels
-    return mel
+        return out, labels
+    return out
 
 
 # TODO: need to fix this function
@@ -227,8 +243,8 @@ def make_d_total(multiplier):
         d_dir = D_direction(d_true, d_pred)
 
         # c_cls
-        c_true = tf.reduce_sum(y_true, axis=(-3, -1))
-        c_pred = tf.reduce_sum(y_pred, axis=(-3, -1))
+        c_true = tf.reduce_sum(y_true, axis=(-3, -2))
+        c_pred = tf.reduce_sum(y_pred, axis=(-3, -2))
         if apply_round:
             c_true = tf.math.round(c_true)
             c_pred = tf.math.round(c_pred)
@@ -252,13 +268,11 @@ def custom_loss(y_true, y_pred, alpha=0.8, l2=1.0):
     c_y_true = tf.reduce_sum(t_true, axis=-1)
     c_y_pred = tf.reduce_sum(t_pred, axis=-1)
 
-    
     loss = alpha * tf.keras.losses.MAE(tf.reduce_sum(d_y_true, axis=1),
                                        tf.reduce_sum(d_y_pred, axis=1)) \
          + (1-alpha) * tf.keras.losses.MAE(tf.reduce_sum(c_y_true, axis=1),
                                            tf.reduce_sum(c_y_pred, axis=1))
-    
-    
+
     # TODO: OT loss
 
     # TV: total variation loss
@@ -305,36 +319,6 @@ def warmup_cosine_decay(lr=0.1, epochs=500, warmup=10):
     return func
 
 
-class Ortho(Regularizer):
-    def __init__(self, lmbd=0.0001, **kwargs):
-        lmbd = kwargs.pop('l', lmbd)  # Backwards compatibility
-        if kwargs:
-            raise TypeError('Argument(s) not recognized: %s' % (kwargs,))
-
-        self.lmbd = K.cast_to_floatx(lmbd)
-
-    def __call__(self, x):
-        inp_shape = x.shape
-        print(inp_shape)
-        # if len(inp_shape) == 4:
-        #     row_dims = inp_shape[0]*inp_shape[1]*inp_shape[2]
-        #     col_dims = inp_shape[3]
-        #     w = K.reshape(w, (row_dims,col_dims))
-        #     W1 = K.transpose(w)
-        # elif len(inp_shape) == 3:
-
-        
-    
-        # Ident = np.eye(col_dims)
-        # W_new = K.dot(W1,w)
-        # Norm  = W_new - Ident
-        # return self.lmbd * math_ops.reduce_sum(math_ops.square(x))
-        return self.lmbd * tf.reduce_sum(tf.square(x))
-
-    def get_config(self):
-        return {'lmbd': float(self.lmbd)}
-
-
 if __name__ == "__main__":
     config = args.parse_args()
     print(config)
@@ -354,7 +338,7 @@ if __name__ == "__main__":
 
 
     """ MODEL """
-    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 2))
+    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 12))
     #x = BatchNormalization(axis=-1, momentum=0.99)(x)
     model = getattr(model, config.model)(
         include_top=False,
@@ -409,7 +393,7 @@ if __name__ == "__main__":
 
     if config.l2 > 0 and config.optimizer != 'adamw':
         model = apply_kernel_regularizer(
-            model, tf.keras.regularizers.l2(config.l2)) #Ortho(config.l2))
+            model, tf.keras.regularizers.l2(config.l2))
 
     if len(config.gpus) > 1:
         model = multi_gpu_model(model, gpus=len(config.gpus))

@@ -117,10 +117,10 @@ def minmax_log_on_mel(mel, labels=None):
     # LOG
     #mel = tf.math.log((mel + 1.) * 10.) #2.71828 -18.420680743952367
     mel = tf.math.log(mel + EPSILON)
-    # mel1 = mel * -1.
-    # mel2 = mel + 18.420680743952367
-    # mel3 = tf.abs(tf.abs(mel + mel2) - 18.420680743952367)
-    # mel = tf.concat([mel1, mel2, mel3], axis=-1)
+    mel1 = mel * -1.
+    mel2 = mel + 18.420680743952367
+    mel3 = tf.abs(tf.abs(mel + mel2) - 18.420680743952367)
+    mel = tf.concat([mel1, mel2, mel3], axis=-1)
 
     if labels is not None:
         return mel, labels
@@ -162,6 +162,11 @@ def make_preprocess_labels(multiplier):
             # sum_pool1d
             y = tf.nn.avg_pool1d(y, 2, strides=2, padding='SAME') * 2
         y *= multiplier
+
+        y = {
+             'out1': y,
+             'out2': y,
+        }
         return x, y
     return preprocess_labels
 
@@ -252,13 +257,11 @@ def custom_loss(y_true, y_pred, alpha=0.8, l2=1.0):
     c_y_true = tf.reduce_sum(t_true, axis=-1)
     c_y_pred = tf.reduce_sum(t_pred, axis=-1)
 
-    
     loss = alpha * tf.keras.losses.MAE(tf.reduce_sum(d_y_true, axis=1),
                                        tf.reduce_sum(d_y_pred, axis=1)) \
          + (1-alpha) * tf.keras.losses.MAE(tf.reduce_sum(c_y_true, axis=1),
                                            tf.reduce_sum(c_y_pred, axis=1))
-    
-    
+
     # TODO: OT loss
 
     # TV: total variation loss
@@ -305,34 +308,14 @@ def warmup_cosine_decay(lr=0.1, epochs=500, warmup=10):
     return func
 
 
-class Ortho(Regularizer):
-    def __init__(self, lmbd=0.0001, **kwargs):
-        lmbd = kwargs.pop('l', lmbd)  # Backwards compatibility
-        if kwargs:
-            raise TypeError('Argument(s) not recognized: %s' % (kwargs,))
+def custom_loss2(y_true, y_pred):
+    # y_true, y_pred = [None, time, 30]
+    y_pred = tf.where(K.greater(y_pred, 0.), y_pred, K.zeros_like(y_pred))
+    loss = tf.keras.losses.MAE(y_true, y_pred)
 
-        self.lmbd = K.cast_to_floatx(lmbd)
-
-    def __call__(self, x):
-        inp_shape = x.shape
-        print(inp_shape)
-        # if len(inp_shape) == 4:
-        #     row_dims = inp_shape[0]*inp_shape[1]*inp_shape[2]
-        #     col_dims = inp_shape[3]
-        #     w = K.reshape(w, (row_dims,col_dims))
-        #     W1 = K.transpose(w)
-        # elif len(inp_shape) == 3:
-
-        
-    
-        # Ident = np.eye(col_dims)
-        # W_new = K.dot(W1,w)
-        # Norm  = W_new - Ident
-        # return self.lmbd * math_ops.reduce_sum(math_ops.square(x))
-        return self.lmbd * tf.reduce_sum(tf.square(x))
-
-    def get_config(self):
-        return {'lmbd': float(self.lmbd)}
+    #bce = tf.keras.losses.BinaryCrossentropy()
+    #bce(y_true, y_pred)
+    return loss
 
 
 if __name__ == "__main__":
@@ -354,7 +337,7 @@ if __name__ == "__main__":
 
 
     """ MODEL """
-    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 2))
+    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 6))
     #x = BatchNormalization(axis=-1, momentum=0.99)(x)
     model = getattr(model, config.model)(
         include_top=False,
@@ -365,6 +348,8 @@ if __name__ == "__main__":
         models=tf.keras.models,
         utils=tf.keras.utils,
     )
+    if config.transfer:
+        load_imagenet(model, scale=0, train_type='imagenet') #'noisy-student', 'imagenet'
     out = model.output
     #out = Dropout(0.2)(out)
     out = tf.transpose(out, perm=[0, 2, 1, 3])
@@ -389,8 +374,9 @@ if __name__ == "__main__":
             out = tf.keras.layers.Flatten()(out)
             out = tf.keras.layers.ReLU()(out)
 
-    out = tf.keras.layers.Dense(config.n_classes, activation='relu')(out)
-    model = tf.keras.models.Model(inputs=model.input, outputs=out)
+    out1 = tf.keras.layers.Dense(config.n_classes, activation='relu', name='out1')(out)
+    out2 = tf.keras.layers.Dense(config.n_classes, activation='relu', name='out2')(out)
+    model = tf.keras.models.Model(inputs=model.input, outputs=[out1, out2])
 
     if config.pretrain:
         model.load_weights(NAME)
@@ -413,9 +399,19 @@ if __name__ == "__main__":
 
     if len(config.gpus) > 1:
         model = multi_gpu_model(model, gpus=len(config.gpus))
-    model.compile(optimizer=opt, 
-                  loss=custom_loss,
-                  metrics=[make_d_total(config.multiplier), cos_sim])
+    model.compile(optimizer=opt,
+                  loss={
+                        'out1': custom_loss,
+                        'out2': custom_loss2,
+                  },
+                  loss_weights={
+                        'out1': 1.0,
+                        'out2': 0.1,
+                  },
+                  metrics={
+                        'out1': [make_d_total(config.multiplier), cos_sim],
+                  },
+                 )
     #model.summary()
     
 
@@ -436,7 +432,7 @@ if __name__ == "__main__":
         LearningRateScheduler(lr_scheduler),
         SWA(start_epoch=TOTAL_EPOCH//2, swa_freq=2),
         ModelCheckpoint(H5_NAME,#NAME
-                        monitor='val_d_total' if config.test else 'd_total', 
+                        monitor='val_out1_d_total' if config.test else 'out1_d_total', 
                         save_best_only=True,
                         verbose=1),
         TerminateOnNaN()

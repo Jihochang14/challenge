@@ -1,8 +1,10 @@
 import argparse
 import numpy as np
 import os
+import glob
 from pathlib import Path
 import json
+import csv
 import pickle
 import tensorflow as tf
 from tensorflow.keras.callbacks import *
@@ -22,6 +24,7 @@ from swa import SWA
 from train_frame import custom_scheduler
 from transforms import *
 from utils import *
+from data_utils import *
 from models import transformer_layer
 from adamp_tf import AdamP
 
@@ -106,46 +109,117 @@ def safe_div(x, y, eps=EPSILON):
     return x / tf.maximum(y, eps)
 
 
-def minmax_log_on_mel(mel, labels=None):
-    axis = tuple(range(1, len(mel.shape)))
+class Spec_Filter(tf.keras.layers.Dense):
+    """
+    Filter on mag
+    input shape must be as [batch, freq, time, channels]
+    """
+    def __init__(self, N_filt=128, fs=16000, nfft=257, initialize_mel=True):
+        super().__init__(N_filt, use_bias=False)
+        self.N_filt = N_filt
+        self.fs = fs
+        self.nfft = nfft
+        self.initialize_mel = initialize_mel
+        
+    def build(self, input_shape):
+        super().build(tf.TensorShape((None, self.nfft)))
 
-    # MIN-MAX
-    mel_max = tf.math.reduce_max(mel, axis=axis, keepdims=True)
-    mel_min = tf.math.reduce_min(mel, axis=axis, keepdims=True)
-    mel = safe_div(mel-mel_min, mel_max-mel_min)
+        if self.initialize_mel:
+            w_init = tf.signal.linear_to_mel_weight_matrix(self.N_filt, self.nfft, self.fs)
+        else:
+            w_init = tf.random_normal_initializer()(shape=(self.nfft, self.N_filt), dtype='float32')              
+        self.set_weights([w_init])
     
-    # LOG
-    #mel = tf.math.log((mel + 1.) * 10.) #2.71828 -18.420680743952367
-    mel = tf.math.log(mel + EPSILON)
-    # mel1 = mel * -1.
-    # mel2 = mel + 18.420680743952367
-    # mel3 = tf.abs(tf.abs(mel + mel2) - 18.420680743952367)
-    # mel = tf.concat([mel1, mel2, mel3], axis=-1)
-
-    if labels is not None:
-        return mel, labels
-    return mel
+    def call(self, inputs):
+        x = tf.tensordot(inputs, self.weights[0], axes=(-3, 0))
+        x = tf.transpose(x, perm=[0, 3, 1, 2])
+        return x
 
 
-# TODO: need to fix this function
-def random_reverse_chan(specs, labels):
-    # Assume MelSpectrogram
-    # specs: [..., freq, time, chan]
-    # labels: [..., time', 30]
-    rev_specs = tf.reverse(specs, [-1])
-    rev_labels = tf.stack(
-        tf.split(labels, 3, axis=-1), axis=-2) # [..., time', 3, 10]
-    rev_labels = tf.reverse(rev_labels, [-1])
-    rev_labels = tf.concat(
-        tf.unstack(rev_labels, axis=-2), axis=-1)
+def make_extractor(config):
+    #spec_filter = Spec_Filter()
+    mel_matrix = tf.signal.linear_to_mel_weight_matrix(
+        config.n_mels, 257, 16000)
 
-    coin = tf.cast(tf.random.uniform([]) > 0.5, tf.float32)
+    def extract(complex_tensor, y=None):
+        # complex_to_magphase
+        n_chan = 2
+        real = complex_tensor[..., :n_chan]
+        img = complex_tensor[..., n_chan:]
 
-    specs = coin * specs + (1-coin) * rev_specs
-    labels = coin * labels + (1-coin) * rev_labels
-                          
-    raise Exception()
-    return specs, labels
+        mag = tf.math.sqrt(real**2 + img**2)
+        phase = tf.math.atan2(img, real)
+
+        mel = tf.tensordot(mag, mel_matrix, axes=[-3, 0]) # [b, time, chan, mel]
+
+        if len(x.shape) == 4:
+            mel = tf.transpose(mel, perm=[0, 3, 1, 2])
+        elif len(x.shape) == 3:
+            mel = tf.transpose(mel, perm=[2, 0, 1])
+        else:
+            raise ValueError('len(x.shape) must be 3 or 4')
+
+        '''
+        axis = tuple(range(1, len(mag.shape)))
+
+        mag_max = tf.math.reduce_max(mag, axis=axis, keepdims=True) # MIN-MAX
+        mag_min = tf.math.reduce_min(mag, axis=axis, keepdims=True)
+        logmag = safe_div(mag-mag_min, mag_max-mag_min)
+
+        logmag = tf.math.log(logmag + EPSILON)
+        logmag1 = logmag * -1.
+        logmag2 = logmag + 18.420680743952367
+        logmag3 = tf.abs(tf.abs(logmag + logmag2) - 18.420680743952367)
+        logmags = tf.concat([logmag1, logmag2, logmag3], axis=-1)
+
+        # magphase_to_mel [b, time, chan, mel]
+        mel = spec_filter(logmags)
+        '''
+
+        # minmax_log_on_mel
+        
+        axis = tuple(range(1, len(mel.shape)))
+        
+        mel_max = tf.math.reduce_max(K.stop_gradient(mel), axis=axis, keepdims=True) # MIN-MAX
+        mel_min = tf.math.reduce_min(K.stop_gradient(mel), axis=axis, keepdims=True)
+        mel = safe_div(mel-mel_min, mel_max-mel_min)
+        
+        mel = tf.math.log(mel + EPSILON)    # LOG
+        mel1 = mel * -1.
+        mel2 = mel + 18.420680743952367
+        mel3 = tf.abs(tf.abs(mel + mel2) - 18.420680743952367)
+        mel = tf.concat([mel1, mel2, mel3], axis=-1)
+        
+
+        # normalized complex
+        # n_real = safe_div(real, mel_max)
+        # n_img = safe_div(img, mel_max)
+        # comp = tf.concat([n_real, n_img], axis=-1)
+
+        # mag_max = tf.math.reduce_max(mag, axis=axis, keepdims=True) # MIN-MAX
+        # mag_min = tf.math.reduce_min(mag, axis=axis, keepdims=True)
+        # logmag = safe_div(mag-mag_min, mag_max-mag_min)
+
+        # logmag = tf.math.log(logmag + EPSILON)
+        # logmag1 = logmag * -1.
+        # logmag2 = logmag + 18.420680743952367
+        # logmag3 = tf.abs(tf.abs(logmag + logmag2) - 18.420680743952367)
+        # comp = tf.concat([logmag1, logmag2, logmag3], axis=-1)
+
+        # comp = tf.stack([complex_tensor[..., 0] / mag[..., 0] * logmag[..., 0],
+        #                 complex_tensor[..., 1] / mag[..., 1] * logmag[..., 1],
+        #                 complex_tensor[..., 2] / mag[..., 0] * logmag[..., 0],
+        #                 complex_tensor[..., 3] / mag[..., 1] * logmag[..., 1]], axis=3)
+
+        inputs = {
+            'mel': mel,
+            #'comp': comp
+        }
+
+        if y is None:
+            return inputs
+        return inputs, y
+    return extract
 
 
 def augment(specs, labels, time_axis=1, freq_axis=0):
@@ -196,15 +270,14 @@ def make_dataset(config, training=True):
                              n_frame=config.n_frame,
                              max_voices=config.max_voices,
                              max_noises=config.max_noises,
-                             n_classes=30,
+                             n_classes=config.n_classes,
                              snr=config.snr)
+
     pipeline = pipeline.map(to_density_labels)
     if training:
         pipeline = pipeline.map(augment)
     pipeline = pipeline.batch(config.batch_size, drop_remainder=False)
-    pipeline = pipeline.map(complex_to_magphase)
-    pipeline = pipeline.map(magphase_to_mel(config.n_mels))
-    pipeline = pipeline.map(minmax_log_on_mel)
+    pipeline = pipeline.map(make_extractor(config))
     pipeline = pipeline.map(make_preprocess_labels(config.multiplier))
     return pipeline.prefetch(AUTOTUNE)
 
@@ -252,13 +325,11 @@ def custom_loss(y_true, y_pred, alpha=0.8, l2=1.0):
     c_y_true = tf.reduce_sum(t_true, axis=-1)
     c_y_pred = tf.reduce_sum(t_pred, axis=-1)
 
-    
     loss = alpha * tf.keras.losses.MAE(tf.reduce_sum(d_y_true, axis=1),
                                        tf.reduce_sum(d_y_pred, axis=1)) \
          + (1-alpha) * tf.keras.losses.MAE(tf.reduce_sum(c_y_true, axis=1),
                                            tf.reduce_sum(c_y_pred, axis=1))
-    
-    
+
     # TODO: OT loss
 
     # TV: total variation loss
@@ -305,34 +376,58 @@ def warmup_cosine_decay(lr=0.1, epochs=500, warmup=10):
     return func
 
 
-class Ortho(Regularizer):
-    def __init__(self, lmbd=0.0001, **kwargs):
-        lmbd = kwargs.pop('l', lmbd)  # Backwards compatibility
-        if kwargs:
-            raise TypeError('Argument(s) not recognized: %s' % (kwargs,))
+def load_json(path):
+    gt = json.load(open(path, 'rb'))['track3_results']
+    gt.sort(key=lambda x: x['id'])
+    angles = np.stack([x['angle'] for x in gt])
+    classes = np.stack([x['class'] for x in gt])
+    return angles, classes
 
-        self.lmbd = K.cast_to_floatx(lmbd)
 
-    def __call__(self, x):
-        inp_shape = x.shape
-        print(inp_shape)
-        # if len(inp_shape) == 4:
-        #     row_dims = inp_shape[0]*inp_shape[1]*inp_shape[2]
-        #     col_dims = inp_shape[3]
-        #     w = K.reshape(w, (row_dims,col_dims))
-        #     W1 = K.transpose(w)
-        # elif len(inp_shape) == 3:
+class Score(tf.keras.callbacks.Callback):
+    def __init__(self, filepath='logs/d_total.csv', data='challenge', multiplier=10.):
+        super(Score, self).__init__()
+        self.filepath = filepath
+        self.multiplier = multiplier
 
+        if data == 'challenge':
+            wavs = glob.glob('./data/t3_audio/*.wav')
+            self.gt_angle, self.gt_class = load_json('./data/t3_res_sample.json')
+        elif data in ['SKKU', 'GIST', 'KICT']:
+            wavs = glob.glob(f'/media/data1/datasets/ai_challenge/2020_validation/{data}/wavs/*.wav')
+            self.gt_angle, self.gt_class = load_json(f'/media/data1/datasets/ai_challenge/2020_validation/{data}/labels.json')
+
+        wavs = list(map(load_wav, wavs))
+        target = max([tuple(wav.shape) for wav in wavs])
+        wavs = list(map(lambda x: tf.pad(x, [[0, 0], [0, target[1]-x.shape[1]], [0, 0]]),
+                        wavs))
+        wavs = tf.convert_to_tensor(wavs)
+        #wavs = complex_to_magphase(wavs) 
+        #wavs = magphase_to_mel(config.n_mels)(wavs) 
+        #wavs = minmax_log_on_mel(wavs) 
+        self.wavs = make_extractor(config)(wavs)
+        self.results = []
+
+    def on_epoch_end(self, epoch, logs=None):
+        wavs = self.model.predict(self.wavs)
         
-    
-        # Ident = np.eye(col_dims)
-        # W_new = K.dot(W1,w)
-        # Norm  = W_new - Ident
-        # return self.lmbd * math_ops.reduce_sum(math_ops.square(x))
-        return self.lmbd * tf.reduce_sum(tf.square(x))
+        wavs = wavs / self.multiplier
+        wavs = tf.reshape(wavs, [*wavs.shape[:2], 3, 10])
 
-    def get_config(self):
-        return {'lmbd': float(self.lmbd)}
+        angles = tf.round(tf.reduce_sum(wavs, axis=(1, 2)))
+        classes = tf.round(tf.reduce_sum(wavs, axis=(1, 3)))
+
+        d_dir = D_direction(tf.cast(self.gt_angle, tf.float32), 
+                        tf.cast(angles, tf.float32))
+        d_cls = D_class(tf.cast(self.gt_class, tf.float32),
+                    tf.cast(classes, tf.float32))
+
+        d_total = (d_dir * 0.8 + d_cls * 0.2).numpy().mean()
+        self.results.append(d_total)
+        with open(self.filepath,'a') as f:
+            writer = csv.writer(f)
+            writer.writerow([d_total])
+        print('d_total: ', d_total)
 
 
 if __name__ == "__main__":
@@ -354,8 +449,15 @@ if __name__ == "__main__":
 
 
     """ MODEL """
-    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 2))
-    #x = BatchNormalization(axis=-1, momentum=0.99)(x)
+    input_mel = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 6), name='mel')
+    # input_comp = tf.keras.layers.Input(shape=(257, config.n_frame, 6), name='comp')
+    
+    # x = ZeroPadding2D((2, 3))(input_comp)
+    # x = Conv2D(12, 7, strides=(2, 1), padding='valid', use_bias=False)(x)
+    # x = BatchNormalization(axis=-1, momentum=0.99)(x)
+    # x = tf.keras.layers.Activation('swish')(x)
+    # x = Concatenate(axis=-1)([input_mel, x])
+    x = input_mel
     model = getattr(model, config.model)(
         include_top=False,
         weights=None,
@@ -366,9 +468,12 @@ if __name__ == "__main__":
         utils=tf.keras.utils,
     )
     out = model.output
-    #out = Dropout(0.2)(out)
     out = tf.transpose(out, perm=[0, 2, 1, 3])
     out = tf.keras.layers.Reshape([-1, out.shape[-1]*out.shape[-2]])(out)
+    #out = Dropout(0.2)(out)
+    
+    #out = tf.keras.layers.Dense(256, activation='swish')(out)
+    #out = Dropout(0.2)(out)
 
     if config.n_layers > 0:
         if config.mode == 'GRU':
@@ -439,6 +544,7 @@ if __name__ == "__main__":
                         monitor='val_d_total' if config.test else 'd_total', 
                         save_best_only=True,
                         verbose=1),
+        Score(filepath=str(NAME / ('d_total.csv')), data='challenge', multiplier=config.multiplier),
         TerminateOnNaN()
     ]
 

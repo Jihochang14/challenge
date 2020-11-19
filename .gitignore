@@ -133,3 +133,4 @@ logs
 *.h5
 *.sh
 data
+workspace*

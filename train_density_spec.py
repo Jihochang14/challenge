@@ -11,7 +11,6 @@ from tensorflow.keras.metrics import *
 from tensorflow.keras.optimizers import *
 from tensorflow.keras.layers import Conv2D, ZeroPadding2D, Concatenate, BatchNormalization, Dropout
 import tensorflow.keras.backend as K
-from tensorflow.keras.regularizers import Regularizer
 from tensorflow.keras.utils import multi_gpu_model
 import tensorflow_addons as tfa
 
@@ -35,7 +34,6 @@ args.add_argument('--gpus', type=int, default=[0], nargs='+')
 args.add_argument('--mode', type=str, default='GRU',
                                  choices=['GRU', 'transformer'])
 args.add_argument('--pretrain', type=bool, default=False)
-args.add_argument('--transfer', default=False, action='store_true')
 args.add_argument('--n_layers', type=int, default=0)
 args.add_argument('--n_dim', type=int, default=256)
 args.add_argument('--n_heads', type=int, default=8)
@@ -85,7 +83,7 @@ args.add_argument('--lr_scheduler', type=str, default='cos',
                                     choices=['rsqrt', 'cos'])
 
 args.add_argument('--epochs', type=int, default=500)
-args.add_argument('--batch_size', type=int, default=12)
+args.add_argument('--batch_size', type=int, default=6)
 args.add_argument('--n_frame', type=int, default=2048)
 args.add_argument('--steps_per_epoch', type=int, default=100)
 args.add_argument('--val_steps_per_epoch', type=int, default=24)
@@ -113,14 +111,10 @@ def minmax_log_on_mel(mel, labels=None):
     mel_max = tf.math.reduce_max(mel, axis=axis, keepdims=True)
     mel_min = tf.math.reduce_min(mel, axis=axis, keepdims=True)
     mel = safe_div(mel-mel_min, mel_max-mel_min)
-    
+
     # LOG
     #mel = tf.math.log((mel + 1.) * 10.) #2.71828 -18.420680743952367
     mel = tf.math.log(mel + EPSILON)
-    # mel1 = mel * -1.
-    # mel2 = mel + 18.420680743952367
-    # mel3 = tf.abs(tf.abs(mel + mel2) - 18.420680743952367)
-    # mel = tf.concat([mel1, mel2, mel3], axis=-1)
 
     if labels is not None:
         return mel, labels
@@ -176,6 +170,57 @@ def to_density_labels(x, y):
     return x, y
 
 
+def make_extractor(config):
+    mel_matrix = tf.signal.linear_to_mel_weight_matrix(config.n_mels, 257, 16000)
+
+    def extract(complex_tensor, y=None):
+        # complex_to_magphase
+        n_chan = 2
+        real = complex_tensor[..., :n_chan] # [b, bins, time, chan]
+        img = complex_tensor[..., n_chan:]
+
+        mag = tf.math.sqrt(real**2 + img**2)
+        phase = tf.math.atan2(img, real)
+
+        # magphase_to_mel
+        mel = tf.tensordot(mag, mel_matrix, axes=[-3, 0]) # [b, time, chan, mel]
+
+        # minmax_log_on_mel
+        axis = tuple(range(1, len(mel.shape)))
+        
+        mel_max = tf.math.reduce_max(mel, axis=axis, keepdims=True) # MIN-MAX
+        mel_min = tf.math.reduce_min(mel, axis=axis, keepdims=True)
+
+        # minmax_log_on_mel
+        axis = tuple(range(1, len(mag.shape)))
+        
+        mag_max = tf.math.reduce_max(mag, axis=axis, keepdims=True) # MIN-MAX
+        mag_min = tf.math.reduce_min(mag, axis=axis, keepdims=True)
+        logmag = safe_div(mag-mag_min, mag_max-mag_min)
+        
+        logmag = tf.math.log(logmag + EPSILON)    # LOG
+        #logmag = tf.math.log(tf.maximum(mag, EPSILON))    # LOG
+        
+        loc = tf.stack([complex_tensor[..., 0] / mag[..., 0] * logmag[..., 0],
+                        complex_tensor[..., 1] / mag[..., 1] * logmag[..., 1],
+                        complex_tensor[..., 2] / mag[..., 0] * logmag[..., 0],
+                        complex_tensor[..., 3] / mag[..., 1] * logmag[..., 1]], axis=3)
+        
+        #out = tf.concat([logmag, loc], axis=-1)
+        #out = tf.concat([logmag, K.zeros_like(logmag), K.zeros_like(logmag)], axis=-1)
+        #out = complex_tensor
+        
+        n_real = safe_div(real, mel_max)
+        n_img = safe_div(img, mel_max)
+        out = tf.concat([n_real, n_img], axis=-1)
+        #out = loc
+
+        if y is None:
+            return out
+        return out, y
+    return extract
+
+
 def make_dataset(config, training=True):
     # Load required datasets
     if training:
@@ -202,9 +247,10 @@ def make_dataset(config, training=True):
     if training:
         pipeline = pipeline.map(augment)
     pipeline = pipeline.batch(config.batch_size, drop_remainder=False)
-    pipeline = pipeline.map(complex_to_magphase)
-    pipeline = pipeline.map(magphase_to_mel(config.n_mels))
-    pipeline = pipeline.map(minmax_log_on_mel)
+    #pipeline = pipeline.map(complex_to_magphase)
+    #pipeline = pipeline.map(magphase_to_mel(config.n_mels))
+    #pipeline = pipeline.map(minmax_log_on_mel)
+    pipeline = pipeline.map(make_extractor(config))
     pipeline = pipeline.map(make_preprocess_labels(config.multiplier))
     return pipeline.prefetch(AUTOTUNE)
 
@@ -227,8 +273,8 @@ def make_d_total(multiplier):
         d_dir = D_direction(d_true, d_pred)
 
         # c_cls
-        c_true = tf.reduce_sum(y_true, axis=(-3, -1))
-        c_pred = tf.reduce_sum(y_pred, axis=(-3, -1))
+        c_true = tf.reduce_sum(y_true, axis=(-3, -2))
+        c_pred = tf.reduce_sum(y_pred, axis=(-3, -2))
         if apply_round:
             c_true = tf.math.round(c_true)
             c_pred = tf.math.round(c_pred)
@@ -252,13 +298,11 @@ def custom_loss(y_true, y_pred, alpha=0.8, l2=1.0):
     c_y_true = tf.reduce_sum(t_true, axis=-1)
     c_y_pred = tf.reduce_sum(t_pred, axis=-1)
 
-    
     loss = alpha * tf.keras.losses.MAE(tf.reduce_sum(d_y_true, axis=1),
                                        tf.reduce_sum(d_y_pred, axis=1)) \
          + (1-alpha) * tf.keras.losses.MAE(tf.reduce_sum(c_y_true, axis=1),
                                            tf.reduce_sum(c_y_pred, axis=1))
-    
-    
+
     # TODO: OT loss
 
     # TV: total variation loss
@@ -287,6 +331,11 @@ def custom_loss(y_true, y_pred, alpha=0.8, l2=1.0):
     return loss
 
 
+def custom_loss2(y_true, y_pred):
+    # y_true, y_pred = [None, time, 30]
+    return tf.keras.losses.MAE(y_true, y_pred)
+
+
 def cos_sim(y_true, y_pred):
     mask = tf.cast(
         tf.reduce_sum(y_true, axis=-2) > 0., tf.float32) # [None, 30]
@@ -303,36 +352,6 @@ def warmup_cosine_decay(lr=0.1, epochs=500, warmup=10):
         else:
             return lr * 0.5 * (1 + np.cos(np.pi * (epoch - warmup) / np.float32(epochs - warmup)))
     return func
-
-
-class Ortho(Regularizer):
-    def __init__(self, lmbd=0.0001, **kwargs):
-        lmbd = kwargs.pop('l', lmbd)  # Backwards compatibility
-        if kwargs:
-            raise TypeError('Argument(s) not recognized: %s' % (kwargs,))
-
-        self.lmbd = K.cast_to_floatx(lmbd)
-
-    def __call__(self, x):
-        inp_shape = x.shape
-        print(inp_shape)
-        # if len(inp_shape) == 4:
-        #     row_dims = inp_shape[0]*inp_shape[1]*inp_shape[2]
-        #     col_dims = inp_shape[3]
-        #     w = K.reshape(w, (row_dims,col_dims))
-        #     W1 = K.transpose(w)
-        # elif len(inp_shape) == 3:
-
-        
-    
-        # Ident = np.eye(col_dims)
-        # W_new = K.dot(W1,w)
-        # Norm  = W_new - Ident
-        # return self.lmbd * math_ops.reduce_sum(math_ops.square(x))
-        return self.lmbd * tf.reduce_sum(tf.square(x))
-
-    def get_config(self):
-        return {'lmbd': float(self.lmbd)}
 
 
 if __name__ == "__main__":
@@ -354,7 +373,7 @@ if __name__ == "__main__":
 
 
     """ MODEL """
-    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 2))
+    x = tf.keras.layers.Input(shape=(257, config.n_frame, 4))
     #x = BatchNormalization(axis=-1, momentum=0.99)(x)
     model = getattr(model, config.model)(
         include_top=False,
@@ -409,12 +428,12 @@ if __name__ == "__main__":
 
     if config.l2 > 0 and config.optimizer != 'adamw':
         model = apply_kernel_regularizer(
-            model, tf.keras.regularizers.l2(config.l2)) #Ortho(config.l2))
+            model, tf.keras.regularizers.l2(config.l2))
 
     if len(config.gpus) > 1:
         model = multi_gpu_model(model, gpus=len(config.gpus))
     model.compile(optimizer=opt, 
-                  loss=custom_loss,
+                  loss=custom_loss2,
                   metrics=[make_d_total(config.multiplier), cos_sim])
     #model.summary()
     

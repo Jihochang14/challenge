@@ -252,13 +252,11 @@ def custom_loss(y_true, y_pred, alpha=0.8, l2=1.0):
     c_y_true = tf.reduce_sum(t_true, axis=-1)
     c_y_pred = tf.reduce_sum(t_pred, axis=-1)
 
-    
     loss = alpha * tf.keras.losses.MAE(tf.reduce_sum(d_y_true, axis=1),
                                        tf.reduce_sum(d_y_pred, axis=1)) \
          + (1-alpha) * tf.keras.losses.MAE(tf.reduce_sum(c_y_true, axis=1),
                                            tf.reduce_sum(c_y_pred, axis=1))
-    
-    
+
     # TODO: OT loss
 
     # TV: total variation loss
@@ -305,34 +303,55 @@ def warmup_cosine_decay(lr=0.1, epochs=500, warmup=10):
     return func
 
 
-class Ortho(Regularizer):
-    def __init__(self, lmbd=0.0001, **kwargs):
-        lmbd = kwargs.pop('l', lmbd)  # Backwards compatibility
-        if kwargs:
-            raise TypeError('Argument(s) not recognized: %s' % (kwargs,))
-
-        self.lmbd = K.cast_to_floatx(lmbd)
-
-    def __call__(self, x):
-        inp_shape = x.shape
-        print(inp_shape)
-        # if len(inp_shape) == 4:
-        #     row_dims = inp_shape[0]*inp_shape[1]*inp_shape[2]
-        #     col_dims = inp_shape[3]
-        #     w = K.reshape(w, (row_dims,col_dims))
-        #     W1 = K.transpose(w)
-        # elif len(inp_shape) == 3:
-
+class Spec_Filter(tf.keras.layers.Layer):
+    """
+    Filter on mag
+    input shape must be as [batch, freq, time, channels]
+    """
+    def __init__(self, N_filt=128, initialize_mel=True, use_bias=False,
+                fs=16000, nfft=257):
+        super().__init__()
+        self.N_filt = N_filt
+        self.use_bias = use_bias
+        self.initialize_mel = initialize_mel
+        self.fs = fs
+        self.nfft = nfft
         
+    def build(self, input_shape):
+        if self.initialize_mel:
+            w_init = tf.signal.linear_to_mel_weight_matrix(
+                    self.N_filt, self.nfft, self.fs)
+        else:
+            w_init = tf.random_normal_initializer()(shape=(input_shape[-1], self.N_filt),
+                                                    dtype='float32')              
+        self.w = tf.Variable(
+            initial_value=w_init,
+            trainable=True,
+            name='Filt_w'
+        )
+        
+        b_init = tf.zeros_initializer()
+        self.b = tf.Variable(
+            b_init(shape=(self.N_filt,), dtype='float32'),
+            trainable=self.use_bias,
+            name='Filt_b'
+            )
     
-        # Ident = np.eye(col_dims)
-        # W_new = K.dot(W1,w)
-        # Norm  = W_new - Ident
-        # return self.lmbd * math_ops.reduce_sum(math_ops.square(x))
-        return self.lmbd * tf.reduce_sum(tf.square(x))
-
+    def call(self, inputs):
+        x = tf.tensordot(inputs, self.w, axes=(-3, 0)) + self.b
+        x = tf.transpose(x, perm=[0, 3, 1, 2])
+        return x
+    
     def get_config(self):
-        return {'lmbd': float(self.lmbd)}
+        base_config = super().get_config().copy()
+        base_config.update({
+            "N_filt": self.N_filt,
+            "use_bias" : self.use_bias,
+            "initialize_mel":self.initialize_mel,
+            "fs":self.fs,
+            "nfft":self.nfft
+            })
+        return dict(list(base_config.items()))
 
 
 if __name__ == "__main__":
@@ -365,6 +384,8 @@ if __name__ == "__main__":
         models=tf.keras.models,
         utils=tf.keras.utils,
     )
+    if config.transfer:
+        load_imagenet(model, scale=0, train_type='noisy-student') #'noisy-student', 'imagenet'
     out = model.output
     #out = Dropout(0.2)(out)
     out = tf.transpose(out, perm=[0, 2, 1, 3])

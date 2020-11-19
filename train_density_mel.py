@@ -115,12 +115,11 @@ def minmax_log_on_mel(mel, labels=None):
     mel = safe_div(mel-mel_min, mel_max-mel_min)
     
     # LOG
-    #mel = tf.math.log((mel + 1.) * 10.) #2.71828 -18.420680743952367
     mel = tf.math.log(mel + EPSILON)
-    # mel1 = mel * -1.
-    # mel2 = mel + 18.420680743952367
-    # mel3 = tf.abs(tf.abs(mel + mel2) - 18.420680743952367)
-    # mel = tf.concat([mel1, mel2, mel3], axis=-1)
+    mel1 = mel * -1.
+    mel2 = mel + 18.420680743952367
+    mel3 = tf.abs(tf.abs(mel + mel2) - 18.420680743952367)
+    mel = tf.concat([mel1, mel2, mel3], axis=-1)
 
     if labels is not None:
         return mel, labels
@@ -305,36 +304,6 @@ def warmup_cosine_decay(lr=0.1, epochs=500, warmup=10):
     return func
 
 
-class Ortho(Regularizer):
-    def __init__(self, lmbd=0.0001, **kwargs):
-        lmbd = kwargs.pop('l', lmbd)  # Backwards compatibility
-        if kwargs:
-            raise TypeError('Argument(s) not recognized: %s' % (kwargs,))
-
-        self.lmbd = K.cast_to_floatx(lmbd)
-
-    def __call__(self, x):
-        inp_shape = x.shape
-        print(inp_shape)
-        # if len(inp_shape) == 4:
-        #     row_dims = inp_shape[0]*inp_shape[1]*inp_shape[2]
-        #     col_dims = inp_shape[3]
-        #     w = K.reshape(w, (row_dims,col_dims))
-        #     W1 = K.transpose(w)
-        # elif len(inp_shape) == 3:
-
-        
-    
-        # Ident = np.eye(col_dims)
-        # W_new = K.dot(W1,w)
-        # Norm  = W_new - Ident
-        # return self.lmbd * math_ops.reduce_sum(math_ops.square(x))
-        return self.lmbd * tf.reduce_sum(tf.square(x))
-
-    def get_config(self):
-        return {'lmbd': float(self.lmbd)}
-
-
 if __name__ == "__main__":
     config = args.parse_args()
     print(config)
@@ -354,7 +323,7 @@ if __name__ == "__main__":
 
 
     """ MODEL """
-    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 2))
+    x = tf.keras.layers.Input(shape=(config.n_mels, config.n_frame, 6))
     #x = BatchNormalization(axis=-1, momentum=0.99)(x)
     model = getattr(model, config.model)(
         include_top=False,
